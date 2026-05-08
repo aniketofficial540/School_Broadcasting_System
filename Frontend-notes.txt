@@ -1,0 +1,122 @@
+====================================================
+  EduBroadcast — Frontend Technical Notes
+====================================================
+
+PROJECT STRUCTURE
+-----------------
+src/
+  components/common/   Reusable UI primitives: Button, Modal, Badge, ContentCard,
+                       EmptyState, Pagination, SkeletonLoader, StatCard, ProtectedRoute
+  context/             AuthContext — global authentication state and login/logout actions
+  data/                mockData.js — in-memory mock database (users + 500 generated content items)
+  hooks/               Custom React hooks: usePagination
+  layouts/             MainLayout — sidebar + topbar shell used by all authenticated pages
+  pages/
+    auth/              Login page
+    teacher/           Dashboard, Upload Content, My Content
+    principal/         Dashboard, Pending Approvals, All Content
+    public/            Live Broadcast page (no authentication required)
+  services/            API call layer — auth.service.js, content.service.js, approval.service.js
+  utils/               Pure helper functions — formatDate, validateFile, getScheduleStatus, etc.
+
+
+AUTHENTICATION FLOW
+-------------------
+1. User submits email + password on the Login page.
+2. LoginPage calls login() exposed by AuthContext.
+3. AuthContext calls loginUser() in auth.service.js.
+4. auth.service.js finds the matching user in MOCK_USERS, strips the password field,
+   and persists the safe user object in localStorage under the key 'edu_broadcast_user'.
+5. AuthContext updates its user state. The Login page reads the returned role and redirects:
+     principal  →  /principal/dashboard
+     teacher    →  /teacher/dashboard
+6. On any page refresh, AuthContext initialises its state with getCurrentUser(), which
+   reads and parses localStorage — so the session survives reloads without a network call.
+7. Calling logout() removes the localStorage entry and sets user state to null,
+   which causes ProtectedRoute to redirect back to /login.
+
+
+ROLE-BASED ROUTING
+------------------
+Every authenticated route is wrapped in <ProtectedRoute allowedRole="teacher|principal">:
+
+  - No user in state            → redirect to /login
+  - User role !== allowedRole   → redirect to that user's own dashboard
+  - Role matches                → render children
+
+The public live broadcast route /live/:teacherId has no ProtectedRoute wrapper and can
+be accessed by anyone without logging in.
+
+Teacher routes:   /teacher/dashboard, /teacher/upload, /teacher/my-content
+Principal routes: /principal/dashboard, /principal/pending, /principal/all-content
+Public routes:    /live/:teacherId
+
+
+API INTEGRATION APPROACH
+------------------------
+All data operations go through a dedicated service layer. Components never access the data
+store directly.
+
+  services/auth.service.js
+    loginUser(email, password)   — authenticates and persists session
+    logoutUser()                 — clears session
+    getCurrentUser()             — reads persisted session
+
+  services/content.service.js
+    getAllContent()                         — full content list (principal view)
+    getContentByTeacher(teacherId)         — filtered by teacher (teacher view)
+    getPendingContent()                    — status === "pending" (approval queue)
+    getActiveContentByTeacher(teacherId)   — approved + currently within schedule window
+    uploadContent(contentData)             — adds new item to the store
+    getContentById(id)                     — single item lookup
+
+  services/approval.service.js
+    approveContent(contentId)              — delegates to updateContentStatus
+    rejectContent(contentId, reason)       — validates reason, then delegates
+
+Each service function uses a simulated async delay (300–800 ms) so the UI exercises its
+loading states exactly as it would against a real backend.
+
+Replacing the mock with a real API requires changes only inside the services/ folder.
+No component code needs to change — just swap the mock logic for axios/fetch calls and
+point them at the real endpoints.
+
+
+STATE MANAGEMENT APPROACH
+-------------------------
+Global state — React Context (AuthContext) holds the authenticated user object and the
+login/logout functions. No external library (Redux, Zustand) is used because the global
+state surface is small.
+
+Local state — Each page component owns its data (list, loading flag, error message) via
+useState + useEffect. This keeps state co-located with where it is used.
+
+Derived / computed state — Filtering, searching, and stat counts are calculated with
+useMemo so they only recompute when their dependencies change, avoiding wasted renders.
+
+Pagination — Managed by the usePagination custom hook (src/hooks/usePagination.js).
+It tracks currentPage, slices the items array, and resets to page 1 whenever the
+source list length changes (e.g. after a filter is applied).
+
+
+ASSUMPTIONS
+-----------
+1. File storage is simulated. The raw file bytes are not stored. A temporary blob URL
+   from URL.createObjectURL() is used for the preview and saved as fileUrl. In production
+   the file would be uploaded to object storage (e.g. AWS S3) and only the returned URL
+   would be persisted.
+
+2. JWT / bearer tokens are not implemented in the mock. In production, loginUser() would
+   receive a token from the server; that token would then be attached as an
+   Authorization: Bearer <token> header in every service call via an axios interceptor
+   or a shared fetch wrapper.
+
+3. The in-memory contentStore in content.service.js resets on page refresh because there
+   is no persistent backend. This is expected for a frontend-only demonstration.
+
+4. Schedule status (scheduled / active / expired) is computed on the client using the
+   browser clock. In production this logic would live server-side to prevent clock-skew
+   issues across devices.
+
+5. Mock data is seeded with 6 hand-crafted items plus 500 programmatically generated
+   items to simulate a realistic dataset for pagination and filter performance testing.
